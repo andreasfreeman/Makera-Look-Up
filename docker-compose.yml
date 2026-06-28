@@ -1,0 +1,7 @@
+services:
+  makera-tool-finder:
+    build: .
+    container_name: makera-tool-finder
+    ports:
+      - "8080:80"
+    restart: unless-stopped
