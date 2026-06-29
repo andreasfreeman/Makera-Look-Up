@@ -68,6 +68,21 @@ th { background:#f8fafc; position:sticky; top:0; z-index:1; font-size:12px; text
 .labelSheet { display:flex; flex-direction:column; gap:8px; min-width:280px; flex:1; }
 .labelHelp { padding:10px; border-radius:12px; background:#f8fafc; border:1px solid #e2e8f0; font-size:12.5px; color:#475467; line-height:1.35; }
 .labelOptions { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
+
+.ncPanel { margin-top:14px; padding:14px; border:1px solid #bfdbfe; background:#eff6ff; border-radius:16px; }
+.ncHead { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+.ncHead h3 { margin:0; font-size:18px; }
+.ncUpload { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.ncUpload input[type=file] { max-width:360px; padding:9px; background:#fff; }
+.ncSummary { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+.ncSummary .pill { background:#fff; }
+.ncTools { margin-top:12px; overflow:auto; border:1px solid #dbeafe; border-radius:14px; background:#fff; display:none; }
+.ncTools table { min-width:1050px; }
+.ncTools .missing { color:#991b1b; font-weight:800; }
+.ncTools .match { color:#166534; font-weight:800; }
+.ncSmall { color:#475467; font-size:13px; line-height:1.35; margin-top:8px; }
+.ncActions { display:flex; gap:8px; flex-wrap:wrap; }
+
 @media (max-width:900px) { .filters { grid-template-columns:1fr 1fr; } .searchrow { grid-template-columns:1fr; } .results { grid-template-columns:1fr; } .controls { position:static; } .formgrid { grid-template-columns:1fr; } .labelOptions { grid-template-columns:1fr; } }
 @media print { @page { size: 60mm 28mm; margin: 3mm; } body * { visibility:hidden; } #labelPrintArea, #labelPrintArea * { visibility:visible; } #labelPrintArea { position:absolute; left:0; top:0; border:0; padding:0; } #labelPrintArea .labelHelp, #labelPrintArea .labelOptions { display:none!important; } }
 </style>
@@ -98,6 +113,22 @@ th { background:#f8fafc; position:sticky; top:0; z-index:1; font-size:12px; text
       <span class="viewtoggle"><button class="secondary" id="cardView">Cards</button><button class="ghost" id="tableView">Table</button><button class="ghost" id="exportBtn">Export Storage</button></span>
     </div>
     <div class="legend"><strong>How to use:</strong> search for the Makera name, click the orange <strong>🛒 Open Amazon Search</strong> button, then use <strong>📦 Storage</strong> to record box/slot, quantity, reorder level, and print or download a UV-ready tube label.</div>
+
+    <div class="ncPanel">
+      <div class="ncHead">
+        <div>
+          <h3>NC File Tool Check</h3>
+          <div class="ncSmall">Upload a Makera/Carvera <strong>.nc</strong> file to see which tool numbers are required, what cutters they are, and the Amazon equivalent search link.</div>
+        </div>
+        <div class="ncUpload">
+          <input id="ncFile" type="file" accept=".nc,.tap,.gcode,.txt">
+          <button class="ghost" id="clearNcBtn">Clear NC</button>
+        </div>
+      </div>
+      <div class="ncSummary" id="ncSummary" style="display:none"></div>
+      <div class="ncTools" id="ncTools"><table><thead><tr><th>Tool #</th><th>Makera Tool From NC</th><th>Specs</th><th>Used In</th><th>Catalog Match</th><th>Amazon</th></tr></thead><tbody id="ncToolsBody"></tbody></table></div>
+      <div class="ncSmall" id="ncHint">Tip: Makera NC files usually include <code>;@MKR|TOOL</code> metadata. If not, this also looks for standard <code>T1 M6</code> tool-change commands.</div>
+    </div>
   </section>
   <div id="empty" class="empty">No matching tools. Try a shorter search like <strong>1.5</strong>, <strong>flat</strong>, <strong>engraving</strong>, or <strong>M3</strong>.</div>
   <section class="results" id="results"></section>
@@ -315,6 +346,92 @@ function exportStorage() {
   const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='makera-tool-storage.json'; a.click(); URL.revokeObjectURL(a.href);
 }
+
+function parseMkrFields(line) {
+  const out={};
+  line.split('|').slice(2).forEach(part=>{
+    const eq=part.indexOf('=');
+    if(eq>0) out[part.slice(0,eq).trim()] = part.slice(eq+1).trim();
+  });
+  return out;
+}
+function parseNcText(text, fileName) {
+  const byNo={};
+  const toolpaths=[];
+  const changes={};
+  const commentNames={};
+  const lines=text.split(/\r?\n/);
+  for(const raw of lines) {
+    const line=raw.trim();
+    if(line.startsWith(';@MKR|TOOL|')) {
+      const f=parseMkrFields(line);
+      if(f.number) byNo[f.number] = Object.assign(byNo[f.number]||{}, f);
+    } else if(line.startsWith(';@MKR|TOOLPATH|')) {
+      const f=parseMkrFields(line);
+      if(f.tool_number) toolpaths.push(f);
+    } else {
+      const cm=line.match(/^;\s*T(\d+)\s*[-–]\s*(.+)$/i);
+      if(cm) commentNames[cm[1]] = cm[2].trim();
+      const m=line.match(/T\s*(\d+)\s*M0?6/i) || line.match(/M0?6\s*T\s*(\d+)/i);
+      if(m) changes[m[1]] = (changes[m[1]]||0)+1;
+    }
+  }
+  Object.keys(commentNames).forEach(n=>{ byNo[n]=Object.assign({number:n,name:commentNames[n]}, byNo[n]||{}); });
+  toolpaths.forEach(tp=>{ const n=tp.tool_number; byNo[n]=byNo[n]||{number:n}; byNo[n].toolpathCount=(byNo[n].toolpathCount||0)+1; if(!byNo[n].toolpathNames) byNo[n].toolpathNames=[]; if(tp.name) byNo[n].toolpathNames.push(tp.name); });
+  Object.keys(changes).forEach(n=>{ byNo[n]=byNo[n]||{number:n}; byNo[n].changeCount=changes[n]; });
+  const list=Object.values(byNo).sort((a,b)=>Number(a.number)-Number(b.number));
+  return {fileName, list, toolpathCount:toolpaths.length, changeTotal:Object.values(changes).reduce((a,b)=>a+b,0)};
+}
+function normToolName(s) { return String(s||'').toLowerCase().replace(/º/g,'°').replace(/\s+/g,'').replace(/\(.*?\)/g,''); }
+function findCatalogMatch(ncTool) {
+  if(ncTool.id) {
+    const idMatch=tools.find(t=>String(t.makeraId)===String(ncTool.id));
+    if(idMatch) return idMatch;
+  }
+  const n=normToolName(ncTool.name);
+  if(n) {
+    let exact=tools.find(t=>normToolName(t.makeraTool)===n);
+    if(exact) return exact;
+    exact=tools.find(t=>normToolName(t.makeraTool).includes(n) || n.includes(normToolName(t.makeraTool)));
+    if(exact) return exact;
+  }
+  const sh=String(ncTool.handlediameter||''); const dia=String(ncTool.diameter||''); const loc=String(ncTool.flutelength||''); const tip=String(ncTool.tipdiameter||'');
+  return tools.find(t=>String(t.shankMm)===sh && String(t.cutDiaMm)===dia && (!loc || String(t.locMm)===loc) && (!tip || !t.tipMm || String(t.tipMm)===tip));
+}
+function ncSpecs(t) {
+  const parts=[];
+  if(t.handlediameter) parts.push('Shank '+t.handlediameter+' mm');
+  if(t.diameter) parts.push('Dia '+t.diameter+' mm');
+  if(t.flutelength) parts.push('LOC '+t.flutelength+' mm');
+  if(t.tipdiameter && t.tipdiameter!==t.diameter) parts.push('Tip '+t.tipdiameter+' mm');
+  if(t.halfAngle) parts.push((parseFloat(t.halfAngle)*2)+'° included');
+  return parts.join(' | ') || 'Specs not included in NC file';
+}
+function amazonUrlForNcTool(ncTool, match) {
+  if(match) return match.amazonUrl;
+  const name=(ncTool.name||('T'+ncTool.number+' CNC end mill')).replace(/[()*|]/g,' ');
+  return 'https://www.amazon.com/s?k=' + encodeURIComponent(name + ' carbide cnc bit');
+}
+function renderNcResult(parsed) {
+  const summary=$('ncSummary'), wrap=$('ncTools'), body=$('ncToolsBody');
+  if(!parsed || !parsed.list.length) {
+    summary.style.display='flex'; wrap.style.display='none';
+    summary.innerHTML='<span class="pill"><strong>No tools found</strong></span><span class="pill">Try a Makera-generated .nc file or a file with T# M6 commands.</span>';
+    body.innerHTML=''; return;
+  }
+  const matches=parsed.list.map(t=>findCatalogMatch(t)).filter(Boolean).length;
+  summary.style.display='flex'; wrap.style.display='block';
+  summary.innerHTML=`<span class="pill"><strong>${escapeHtml(parsed.fileName||'NC file')}</strong></span><span class="pill"><strong>${parsed.list.length}</strong>&nbsp;unique tools needed</span><span class="pill"><strong>${parsed.toolpathCount}</strong>&nbsp;toolpaths</span><span class="pill"><strong>${parsed.changeTotal}</strong>&nbsp;tool changes</span><span class="pill"><strong>${matches}</strong>&nbsp;catalog matches</span>`;
+  body.innerHTML=parsed.list.map(nc=>{
+    const m=findCatalogMatch(nc); const url=amazonUrlForNcTool(nc,m);
+    const used=[]; if(nc.toolpathCount) used.push(nc.toolpathCount+' toolpath'+(nc.toolpathCount===1?'':'s')); if(nc.changeCount) used.push(nc.changeCount+' tool change'+(nc.changeCount===1?'':'s'));
+    const matchHtml=m ? `<span class="match">Matched</span><br>${escapeHtml(m.makeraTool)}<br><span class="small">${escapeHtml(m.preferredBrand)}</span>` : '<span class="missing">No exact catalog match</span><br><span class="small">Use generated Amazon search and verify dimensions.</span>';
+    const btns=m ? `<div class="ncActions"><a class="tablelink" target="_blank" rel="noopener" href="${url}">🛒 Open Search</a><button class="ghost" onclick="openStorage(tools.indexOf(tools.find(x=>x.makeraId==='${escapeHtml(m.makeraId)}')))">Label</button></div>` : `<a class="tablelink" target="_blank" rel="noopener" href="${url}">🛒 Open Search</a>`;
+    return `<tr><td><strong>T${escapeHtml(nc.number)}</strong></td><td>${escapeHtml(nc.name||'Tool number '+nc.number)}${nc.type?'<br><span class="small">'+escapeHtml(nc.type)+'</span>':''}</td><td>${escapeHtml(ncSpecs(nc))}</td><td>${escapeHtml(used.join(' / ')||'Listed in file')}</td><td>${matchHtml}</td><td>${btns}</td></tr>`;
+  }).join('');
+}
+function clearNcResult() { $('ncFile').value=''; $('ncSummary').style.display='none'; $('ncTools').style.display='none'; $('ncToolsBody').innerHTML=''; }
+
 function escapeHtml(s) { return String(s||'').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 ['search','category','material','priority','group','storageFilter'].forEach(id => $(id).addEventListener('input', render));
 ['boxInput','slotInput','qtyInput','reorderInput','notesInput'].forEach(id => $(id).addEventListener('input', updateLabelPreview));
@@ -331,6 +448,15 @@ $('downloadPngBtn').addEventListener('click', downloadLabelPng);
 $('copyLinkBtn').addEventListener('click', () => { if(activeIndex!==null) copyText(tools[activeIndex].amazonUrl, $('copyLinkBtn')); });
 $('copyLabelTextBtn').addEventListener('click', () => { if(activeIndex!==null) copyText(labelText(tools[activeIndex]), $('copyLabelTextBtn')); });
 $('storageModal').addEventListener('click', e => { if(e.target.id==='storageModal') $('storageModal').classList.remove('open'); });
+
+$('ncFile').addEventListener('change', e => {
+  const file=e.target.files && e.target.files[0];
+  if(!file) return;
+  const reader=new FileReader();
+  reader.onload=()=>renderNcResult(parseNcText(String(reader.result||''), file.name));
+  reader.readAsText(file);
+});
+$('clearNcBtn').addEventListener('click', clearNcResult);
 render();
 </script>
 </body>
